@@ -123,9 +123,19 @@ static VTLAsk wrap(VTLAsk original) {
 }
 
 %hook SGLyricsProvider
-- (NSString *)name { return isBini(self) ? @"VTL" : %orig; }
-- (NSString *)detail { return isBini(self) ? @"Your uploads, word timed, then BiniLyrics" : %orig; }
-- (id)ask { return isBini(self) ? (id)wrap((VTLAsk)%orig) : %orig; }
+- (NSString *)name {
+    NSString *original = %orig;
+    return isBini(self) ? @"VTL" : original;
+}
+- (NSString *)detail {
+    NSString *original = %orig;
+    return isBini(self) ? @"Your uploads, word timed, then BiniLyrics" : original;
+}
+- (id)ask {
+    id original = %orig;
+    if (!isBini(self)) return original;
+    return (id)wrap((VTLAsk)original);
+}
 %end
 
 #pragma mark - load badge (diagnostic)
