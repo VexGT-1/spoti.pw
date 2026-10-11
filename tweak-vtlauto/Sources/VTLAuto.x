@@ -26,6 +26,7 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <mach-o/dyld.h>
+#import <mach-o/loader.h>
 #import <malloc/malloc.h>
 
 static NSString *const kVTLBase = @"https://api.vexqyq.com/lyrics/";
@@ -33,8 +34,14 @@ static NSString *const kBiniHost = @"lyrics-api.binimum.org";
 static NSString *const kMarker = @"vtl:";
 static NSString *const kVTLKey = @"vtl";
 
-// Where the official kit's spotifyglass.dylib keeps its provider array, relative to the image.
-static const uintptr_t kAllSlotOffset = 0x3b3f78;
+// Where each known spotifyglass.dylib build keeps its provider array, relative to the image, keyed by
+// the image's LC_UUID so a build this was not checked against is never written to (that fallback just
+// stands down; the +arrayWithObjects:count: hook below needs no offsets and covers it). Each offset is
+// the address the build's SGLyricsAllProviders() stores its array to, read off its disassembly.
+static const struct { const char *uuid; uintptr_t slot; } kKnownLists[] = {
+    { "adfbf83aec1a3186948d7ff4318bb6ba", 0x3b3f78 },   // official kit v0.50.0
+    { "d4c75c03b90b329d83b960d768cc43aa", 0x532ed0 },   // 0.51.0-beta.1
+};
 
 typedef void (^VTLDone)(id result);
 typedef void (^VTLAsk)(id query, VTLDone done);
@@ -220,6 +227,24 @@ static BOOL withVTL(const id __unsafe_unretained *objects, NSUInteger cnt, id __
 
 #pragma mark - way 2: the array was already built before we loaded
 
+// The image's LC_UUID as 32 lowercase hex digits, "" when it has none.
+static NSString *imageUUID(const struct mach_header *header) {
+    const struct mach_header_64 *h = (const struct mach_header_64 *)header;
+    if (h->magic != MH_MAGIC_64) return @"";
+    const uint8_t *p = (const uint8_t *)(h + 1);
+    for (uint32_t i = 0; i < h->ncmds; i++) {
+        const struct load_command *lc = (const struct load_command *)p;
+        if (lc->cmd == LC_UUID) {
+            const struct uuid_command *u = (const struct uuid_command *)lc;
+            NSMutableString *hex = [NSMutableString stringWithCapacity:32];
+            for (int b = 0; b < 16; b++) [hex appendFormat:@"%02x", u->uuid[b]];
+            return hex;
+        }
+        p += lc->cmdsize;
+    }
+    return @"";
+}
+
 static void patchExistingList(void) {
     if (gInjected || !gProviderClass) return;
     const struct mach_header *header = NULL;
@@ -228,7 +253,13 @@ static void patchExistingList(void) {
         if (name && strstr(name, "/spotifyglass.dylib")) { header = _dyld_get_image_header(i); break; }
     }
     if (!header) return;
-    void **slot = (void **)((uintptr_t)header + kAllSlotOffset);
+    NSString *uuid = imageUUID(header);
+    uintptr_t slotOffset = 0;
+    for (size_t k = 0; k < sizeof(kKnownLists) / sizeof(kKnownLists[0]); k++) {
+        if ([uuid isEqualToString:@(kKnownLists[k].uuid)]) { slotOffset = kKnownLists[k].slot; break; }
+    }
+    if (!slotOffset) return;                                      // a build not checked: the hook alone covers it
+    void **slot = (void **)((uintptr_t)header + slotOffset);
     void *current = *slot;
     if (!current || malloc_size(current) == 0) return;            // not a heap object: wrong offset, stand down
     id list = (__bridge id)current;
